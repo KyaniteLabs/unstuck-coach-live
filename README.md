@@ -6,7 +6,9 @@ Unstuck Coach is a whole-person executive-function accessibility coach. It helps
 
 - Landing page: `https://unstuck.kyanitelabs.tech/`
 - Live demo: `https://unstuck.kyanitelabs.tech/chat/`
-- Source: `https://github.com/simongonzalezdc/unstuck-coach`
+- Source: this dedicated live-product repository. It was extracted from the old
+  `EF-COACH/` subfolder so Unstuck Coach no longer shares a Git root with Dev
+  Learning Archaeologist.
 
 ## What It Does
 
@@ -58,6 +60,16 @@ install path for the public repo.
 - `reference/` contains protocols, signal maps, safety boundaries, and calendar/inbox playbooks.
 - `demo/before-after.md` shows the difference between generic advice and coaching.
 - `landing/` contains the public website.
+- `live-demo/` contains the hosted chat server, Dockerfile, deployment compose
+  template, and live-demo tests.
+
+## Repository Boundary
+
+This repository is only the live Unstuck Coach product: public landing page,
+chat demo, coach contract, and deployment assets.
+
+It is not Dev Learning Archaeologist, not Innerscape, and not the Innerscape
+local/open-source merge branch.
 
 ## Safety
 
