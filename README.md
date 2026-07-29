@@ -1,11 +1,26 @@
-# Unstuck Coach
+# Unstuck Coach (live)
 
-Unstuck Coach is a whole-person executive-function accessibility coach. It helps someone turn a messy stuck point into one humane next move while keeping the rest of the task pile out of working memory.
+Product surface for Unstuck Coach: landing, chat demo, coach contract, and deployment assets.
+
+**Who it is for:** people who get stuck mid-task and need one humane next move, not a productivity lecture.
+
+**What you get:** a deployable live coach experience wired to the Unstuck Coach contract.
 
 ## Try it
 
-Clone the repository and follow scripts or package docs in-tree for the current install path.
+```bash
+git clone https://github.com/KyaniteLabs/unstuck-coach-live.git
+cd unstuck-coach-live
+# open package scripts / deploy docs in-tree for the current host path
+```
+
+Protocol and evidence live in sibling repos (`unstuck-coach-protocol`, personal `unstuck-coach`).
 
 ## Docs
 
-- See source tree and package metadata for authoritative usage.
+- Source and deploy assets in this repository
+- Homepage when published: check repo description / deploy config
+
+## License
+
+See [LICENSE](LICENSE).
