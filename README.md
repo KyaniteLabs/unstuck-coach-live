@@ -1,26 +1,76 @@
-# Unstuck Coach (live)
+# Unstuck Coach
 
-Product surface for Unstuck Coach: landing, chat demo, coach contract, and deployment assets.
+Unstuck Coach is a whole-person executive-function accessibility coach. It helps someone turn a messy stuck point into one humane next move while keeping the rest of the task pile out of working memory.
 
-**Who it is for:** people who get stuck mid-task and need one humane next move, not a productivity lecture.
+## Try It
 
-**What you get:** a deployable live coach experience wired to the Unstuck Coach contract.
+- Landing page: `https://unstuck.kyanitelabs.tech/`
+- Live demo: `https://unstuck.kyanitelabs.tech/chat/`
+- Source: this dedicated live-product repository. It was extracted from the old
+  `EF-COACH/` subfolder so Unstuck Coach no longer shares a Git root with Dev
+  Learning Archaeologist.
 
-## Try it
+## What It Does
 
-```bash
-git clone https://github.com/KyaniteLabs/unstuck-coach-live.git
-cd unstuck-coach-live
-# open package scripts / deploy docs in-tree for the current host path
-```
+- Accepts messy input without making the user organize first.
+- Names the friction in plain language, without blame.
+- Gives one concrete next move, not a productivity article.
+- Holds the rest of the pile so the user does not have to.
+- Covers body state, calendar, inbox, messages, home/admin loops, capture, re-entry, and shutdown.
+- Avoids therapy, diagnosis, medication advice, crisis handling, and autonomous account access.
 
-Protocol and evidence live in sibling repos (`unstuck-coach-protocol`, personal `unstuck-coach`).
+## Quick Quality Check
 
-## Docs
+Unstuck is working when:
 
-- Source and deploy assets in this repository
-- Homepage when published: check repo description / deploy config
+- It coaches the next move instead of merely answering a question.
+- The situation is specific: executive-function access across body state, calendar/inbox, messages, admin loops, capture, re-entry, and closure.
+- Each file has one clear job, so the method is easy to inspect and reuse.
+- A new reader can open this README, try the live demo, or load the project files without needing private keys or an npm setup.
 
-## License
+## Live Demo Configuration
 
-See [LICENSE](LICENSE).
+The live demo can send low-volume anonymous usage events to PostHog, but the repo
+does not ship a project key. Keep analytics keys in deploy-time environment
+variables:
+
+- `POSTHOG_ENABLED=true`
+- `POSTHOG_PROJECT_API_KEY=<set in the deploy environment>`
+- `POSTHOG_HOST=https://us.i.posthog.com`
+
+The browser tracker also refuses to send direct analytics unless the deployed
+page provides `window.UnstuckAnalyticsConfig.posthogProjectKey` or a
+`posthog-project-key` meta tag. Do not commit live analytics keys to source.
+
+## Use It Through Project Context
+
+Unstuck Coach is meant to run from the project files themselves. There is no npm
+install path for the public repo.
+
+1. Add the project files as knowledge in Claude Project or another AI workspace.
+2. Use `coach/PROJECT_INSTRUCTIONS.md` as the project instruction.
+3. Start with the stuck point in front of you. Messy input is fine.
+
+## Source Layout
+
+- `coach/PROJECT_INSTRUCTIONS.md` is the paste-ready instruction for an AI project.
+- `coach/identity.md` defines the coach, audience, voice, and boundaries.
+- `coach/rules.md` is the behavior contract.
+- `coach/examples.md` calibrates good first replies.
+- `reference/` contains protocols, signal maps, safety boundaries, and calendar/inbox playbooks.
+- `demo/before-after.md` shows the difference between generic advice and coaching.
+- `landing/` contains the public website.
+- `live-demo/` contains the hosted chat server, Dockerfile, deployment compose
+  template, and live-demo tests.
+
+## Repository Boundary
+
+This repository is only the live Unstuck Coach product: public landing page,
+chat demo, coach contract, and deployment assets.
+
+It is not Dev Learning Archaeologist, not Innerscape, and not the Innerscape
+local/open-source merge branch.
+
+## Safety
+
+Unstuck Coach helps with access to the next move. It does not read accounts, send messages, schedule events, provide clinical care, or replace qualified professional support.
