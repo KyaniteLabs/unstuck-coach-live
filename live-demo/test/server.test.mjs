@@ -461,3 +461,93 @@ test("POST /api/coach sends prior conversation turns to the model", async (t) =>
     { role: "user", content: "Can you make the next step smaller?" },
   ]);
 });
+
+test("POST /api/coach logs an empty message as a rejected request", async (t) => {
+  const events = [];
+  const server = createLiveDemoServer({
+    callModel: async () => {
+      throw new Error("model should not be called");
+    },
+    usageLogger: (event) => events.push(event),
+  });
+  t.after(() => server.close());
+  const baseUrl = await listen(server);
+
+  const response = await fetch(`${baseUrl}/api/coach`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "   " }),
+  });
+
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), { error: "message is required" });
+  assert.deepEqual(
+    events.map((event) => [event.event, event.status, event.reason]),
+    [["request_rejected", 400, "message is required"]],
+  );
+});
+
+test("POST /api/coach keeps a successful reply when the usage logger throws", async (t) => {
+  const events = [];
+  const server = createLiveDemoServer({
+    callModel: async () => ({ text: "One move.", provider: "test-provider", model: "test-model" }),
+    usageLogger: (event) => {
+      events.push(event.event);
+      if (event.event === "llm_reply_ok") {
+        throw new Error("log sink unavailable");
+      }
+    },
+  });
+  t.after(() => server.close());
+  const baseUrl = await listen(server);
+
+  const response = await fetch(`${baseUrl}/api/coach`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "Help me start." }),
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).reply, "One move.");
+  assert.deepEqual(events, ["chat_started", "llm_reply_ok"], "no contradictory llm_error after a reply");
+});
+
+test("POST /api/coach reports exactly one outcome per request", async (t) => {
+  const events = [];
+  let call = 0;
+  const server = createLiveDemoServer({
+    env: { COACH_RATE_LIMIT_MAX: "100" },
+    callModel: async () => {
+      call += 1;
+      if (call === 2) throw new Error("provider down");
+      return { text: "One move.", provider: "p", model: "m" };
+    },
+    usageLogger: (event) => events.push(event),
+  });
+  t.after(() => server.close());
+  const baseUrl = await listen(server);
+
+  const post = (body, headers = {}) =>
+    fetch(`${baseUrl}/api/coach`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...headers },
+      body,
+    });
+  assert.equal((await post(JSON.stringify({ message: "ok" }))).status, 200);
+  assert.equal((await post(JSON.stringify({ message: "boom" }))).status, 502);
+  assert.equal((await post("{")).status, 400);
+  assert.equal((await post(JSON.stringify({ message: "x" }), { "content-type": "text/plain" })).status, 415);
+
+  const outcomes = new Set(["llm_reply_ok", "llm_error", "rate_limited", "request_rejected"]);
+  const byRequest = new Map();
+  for (const event of events) {
+    if (!byRequest.has(event.requestId)) byRequest.set(event.requestId, []);
+    byRequest.get(event.requestId).push(event.event);
+  }
+  assert.equal(byRequest.size, 4);
+  for (const sequence of byRequest.values()) {
+    assert.equal(sequence.filter((name) => outcomes.has(name)).length, 1, sequence.join(","));
+    const startIndex = sequence.indexOf("chat_started");
+    if (sequence.includes("llm_reply_ok")) assert.ok(startIndex >= 0 && startIndex < sequence.indexOf("llm_reply_ok"));
+  }
+});

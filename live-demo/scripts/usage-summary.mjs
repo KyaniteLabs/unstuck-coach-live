@@ -4,19 +4,23 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { stdin } from "node:process";
 
+import {
+  ERROR_EVENTS,
+  TRACKED_EVENTS,
+  USAGE_EVENT,
+  deriveUsageStatus,
+  isErrorEvent,
+  isUsageLogType,
+  summarizeSessions,
+} from "../lib/usage-events.mjs";
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-const USAGE_LOG_TYPE = "unstuck_usage";
 const DEFAULT_AGGREGATE_FILE = `${__dirname}/unstuck_usage_alltime.json`;
-const TRACKED_EVENTS = [
-  "view_landing",
-  "view_chat",
-  "chat_started",
-  "llm_reply_ok",
-  "llm_error",
-  "rate_limited",
-  "request_rejected",
-];
+
+function countErrors(counts) {
+  return ERROR_EVENTS.reduce((sum, event) => sum + (counts.get(event) || 0), 0);
+}
 
 function withTrackedEventDefaults(source) {
   const base = Object.create(null);
@@ -165,7 +169,7 @@ function parseUsageLine(line) {
   }
   try {
     const parsed = JSON.parse(line.slice(jsonStart));
-    return parsed?.type === USAGE_LOG_TYPE || parsed?.type === `${USAGE_LOG_TYPE}_log` ? parsed : null;
+    return isUsageLogType(parsed?.type) ? parsed : null;
   } catch {
     return null;
   }
@@ -186,83 +190,6 @@ function percentile(values, p) {
   }
   const index = Math.floor((values.length - 1) * p);
   return values[index];
-}
-
-function summarizeSessions(events) {
-  const sessions = new Map();
-  for (const event of events) {
-    const key = event.sessionId || event.requestId || event.status;
-    if (!key) {
-      continue;
-    }
-    const current = sessions.get(key) || {
-      hasLanding: false,
-      hasChat: false,
-      hasStarted: false,
-      hasReply: false,
-      requestRejected: false,
-      rateLimited: false,
-    };
-
-    if (event.event === "view_landing") {
-      current.hasLanding = true;
-    } else if (event.event === "view_chat") {
-      current.hasChat = true;
-    } else if (event.event === "chat_started") {
-      current.hasStarted = true;
-    } else if (event.event === "llm_reply_ok") {
-      current.hasReply = true;
-    } else if (event.event === "request_rejected") {
-      current.requestRejected = true;
-    } else if (event.event === "rate_limited") {
-      current.rateLimited = true;
-    }
-
-    sessions.set(key, current);
-  }
-
-  let withLanding = 0;
-  let withChat = 0;
-  let withStarted = 0;
-  let withReply = 0;
-  let landingToChat = 0;
-  let chatToStarted = 0;
-  let startedToReply = 0;
-
-  for (const state of sessions.values()) {
-    if (state.hasLanding) {
-      withLanding += 1;
-    }
-    if (state.hasChat) {
-      withChat += 1;
-    }
-    if (state.hasStarted) {
-      withStarted += 1;
-    }
-    if (state.hasReply) {
-      withReply += 1;
-    }
-    if (state.hasLanding && state.hasChat) {
-      landingToChat += 1;
-    }
-    if (state.hasChat && state.hasStarted) {
-      chatToStarted += 1;
-    }
-    if (state.hasStarted && state.hasReply) {
-      startedToReply += 1;
-    }
-  }
-
-  return {
-    sessionsTotal: sessions.size,
-    withLanding,
-    withChat,
-    withStarted,
-    withReply,
-    landingToChat,
-    chatToStarted,
-    startedToReply,
-  };
 }
 
 async function checkPosthogHealth(posthogUrl) {
@@ -353,7 +280,7 @@ async function main() {
       lastSeen = event.timestamp;
     }
 
-    if (event.event === "llm_reply_ok") {
+    if (event.event === USAGE_EVENT.LLM_REPLY_OK) {
       const by = `${event.provider || "unknown"}.${event.model || "unknown"}`;
       increment(providerModel, by);
       if (persistEnabled) {
@@ -369,7 +296,7 @@ async function main() {
       }
     }
 
-    if (event.event === "llm_error") {
+    if (event.event === USAGE_EVENT.LLM_ERROR) {
       increment(errorReasons, event.errorType || "unknown");
       if (persistEnabled) {
         mergeValues(aggregate.errorReasons, event.errorType || "unknown");
@@ -380,7 +307,7 @@ async function main() {
       }
     }
 
-    if (event.event === "rate_limited" || event.event === "request_rejected") {
+    if (isErrorEvent(event.event) && event.event !== USAGE_EVENT.LLM_ERROR) {
       increment(errorReasons, String(event.reason || event.rejectionType || event.status || "unknown"));
       if (persistEnabled) {
         mergeValues(
@@ -405,19 +332,17 @@ async function main() {
   }
 
   if (persistEnabled) {
-    aggregate.totalErrors = (usageCounts.get("llm_error") || 0)
-      + (usageCounts.get("rate_limited") || 0)
-      + (usageCounts.get("request_rejected") || 0)
-      + aggregate.totalErrors;
+    aggregate.totalErrors = countErrors(usageCounts) + aggregate.totalErrors;
   }
 
   const sortedLatencies = responseLatencies.sort((a, b) => a - b);
   const sessionMetrics = summarizeSessions(eventList);
-  const hasErrors =
-    usageCounts.get("llm_error") > 0 ||
-    usageCounts.get("rate_limited") > 0 ||
-    usageCounts.get("request_rejected") > 0;
-  const hasTraffic = [...usageCounts.values()].some((count) => count > 0);
+  const windowTotalErrors = countErrors(usageCounts);
+  const windowTotalEvents = [...usageCounts.values()].reduce((sum, count) => sum + count, 0);
+  const allTimeTotalEvents = Object.values(aggregate.events).reduce(
+    (sum, count) => sum + (Number(count) || 0),
+    0,
+  );
 
   const allEvents = withTrackedEventDefaults(Object.fromEntries([...usageCounts.entries()]));
   const allTimeEvents = withTrackedEventDefaults(
@@ -462,7 +387,7 @@ async function main() {
       providerModel: persistEnabled ? aggregate.providerModel : providerModelCounts,
       errorCountsByReason: persistEnabled ? aggregate.errorReasons : errorReasonCounts,
       errors: {
-        totalErrors: persistEnabled ? aggregate.totalErrors : (usageCounts.get("llm_error") || 0) + (usageCounts.get("rate_limited") || 0) + (usageCounts.get("request_rejected") || 0),
+        totalErrors: persistEnabled ? aggregate.totalErrors : windowTotalErrors,
       },
       firstSeen: persistEnabled ? aggregate.firstSeen : (firstSeen || null),
       lastSeen: persistEnabled ? aggregate.lastSeen : (lastSeen || null),
@@ -479,7 +404,9 @@ async function main() {
         p95: percentile(sortedLatencies, 0.95),
         p99: percentile(sortedLatencies, 0.99),
       },
-      status: persistEnabled ? (aggregate.totalErrors > 0 ? "showing errors/rate limiting" : "active") : undefined,
+      status: persistEnabled
+        ? deriveUsageStatus({ totalEvents: allTimeTotalEvents, totalErrors: aggregate.totalErrors })
+        : undefined,
     },
     latencyMs: {
       samples: sortedLatencies.length,
@@ -496,9 +423,9 @@ async function main() {
     },
     errors: {
       countsByReason: errorReasonCounts,
-      totalErrors: (usageCounts.get("llm_error") || 0) + (usageCounts.get("rate_limited") || 0) + (usageCounts.get("request_rejected") || 0),
+      totalErrors: windowTotalErrors,
     },
-    status: hasErrors ? "showing errors/rate limiting" : hasTraffic ? "active" : "quiet",
+    status: deriveUsageStatus({ totalEvents: windowTotalEvents, totalErrors: windowTotalErrors }),
   };
 
   if (persistEnabled && parsedUsageEvents > 0) {
