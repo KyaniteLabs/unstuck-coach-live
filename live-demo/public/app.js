@@ -1,3 +1,10 @@
+import {
+  VOICE_STATE,
+  createSendMachine,
+  createVoiceMachine,
+  shouldClearSavedDraftAfterReply,
+} from "./chat-machine.js";
+
 const form = document.querySelector("#coach-form");
 const message = document.querySelector("#message");
 const chatLog = document.querySelector("#chat-log");
@@ -21,7 +28,8 @@ const sendStatus = document.querySelector("#send-status");
 const thread = [];
 const heldItems = [];
 let energyLevel = null;
-let currentRecognition = null;
+const voice = createVoiceMachine();
+const send = createSendMachine();
 let voiceBaseDraft = "";
 let lastVoiceTranscript = "";
 let loadingTimers = [];
@@ -432,14 +440,15 @@ function setVoiceState(text, busy = false) {
 }
 
 function stopVoiceInput(status = "Stopped listening.") {
-  if (currentRecognition) {
+  const recognition = voice.session;
+  if (recognition) {
+    voice.stop();
     try {
-      currentRecognition.stop();
+      recognition.stop();
     } catch {
-      currentRecognition.abort?.();
+      recognition.abort?.();
     }
   }
-  currentRecognition = null;
   setVoiceState(status, false);
   message.focus();
 }
@@ -488,7 +497,12 @@ function applyVoiceTranscript(transcript) {
 }
 
 function startVoiceInput() {
-  if (currentRecognition) {
+  if (voice.state === VOICE_STATE.STOPPING) {
+    // The user restarts before the old session's "end" arrived: retire it so
+    // its late events are ignored, then start fresh below.
+    voice.abandon();
+  }
+  if (voice.state !== VOICE_STATE.IDLE) {
     stopVoiceInput("Stopped listening. Captured text stays in the box.");
     return;
   }
@@ -512,21 +526,22 @@ function startVoiceInput() {
     focusManualDictationFallback("Voice typing did not initialize. I focused the box for keyboard dictation.");
     return;
   }
-  let endedWithError = false;
   voiceBaseDraft = message.value.trim();
   lastVoiceTranscript = "";
   recognition.lang = navigator.language || "en-US";
   recognition.interimResults = true;
   recognition.continuous = true;
   recognition.maxAlternatives = 1;
-  currentRecognition = recognition;
+  voice.start(recognition);
 
   recognition.addEventListener("start", () => {
+    if (!voice.started(recognition)) return;
     trackChat("voice started");
     setVoiceState("Listening. Say the messy version. Tap Mic again to stop.", true);
   });
 
   recognition.addEventListener("result", (event) => {
+    if (!voice.acceptsResults(recognition)) return;
     const transcript = extractRecognitionTranscript(event);
     if (transcript) {
       applyVoiceTranscript(transcript);
@@ -536,13 +551,15 @@ function startVoiceInput() {
   });
 
   recognition.addEventListener("speechend", () => {
+    if (!voice.isCurrent(recognition)) return;
     voiceStatus.textContent = "Processing speech.";
   });
 
   recognition.addEventListener("end", () => {
-    currentRecognition = null;
+    const endedFrom = voice.ended(recognition);
+    if (endedFrom === null) return;
     setVoiceState(
-      endedWithError
+      endedFrom === VOICE_STATE.ERRORED || endedFrom === VOICE_STATE.STOPPING
         ? voiceStatus.textContent
         : lastVoiceTranscript || message.value.trim()
           ? "Captured. Press Enter or Send."
@@ -553,7 +570,7 @@ function startVoiceInput() {
   });
 
   recognition.addEventListener("error", (event) => {
-    endedWithError = true;
+    if (!voice.errored(recognition)) return;
     trackChat("voice failed", { reason: event.error || "unknown" });
     focusManualDictationFallback(getVoiceErrorMessage(event.error));
   });
@@ -561,7 +578,7 @@ function startVoiceInput() {
   try {
     recognition.start();
   } catch {
-    currentRecognition = null;
+    voice.abort(recognition);
     trackChat("voice failed", { reason: "start" });
     focusManualDictationFallback("Voice typing did not start. I focused the box for keyboard dictation.");
   }
@@ -616,7 +633,7 @@ form.addEventListener("submit", async (event) => {
   event.preventDefault();
 
   const content = message.value.trim();
-  if (!content || submit.disabled) {
+  if (!content || send.isSending) {
     return;
   }
 
@@ -636,6 +653,7 @@ form.addEventListener("submit", async (event) => {
   startLoadingProgress();
   submit.setAttribute("aria-busy", "true");
   submit.disabled = true;
+  send.begin();
   const startedAt = performance.now();
 
   try {
@@ -666,7 +684,7 @@ form.addEventListener("submit", async (event) => {
       model: body.model || null,
       input_length_bucket: inputLengthBucket,
     });
-    clearSavedDraft();
+    if (shouldClearSavedDraftAfterReply(message.value)) clearSavedDraft();
     setSendStatus("Response received.", "ready");
     renderMessages();
   } catch (error) {
@@ -678,6 +696,7 @@ form.addEventListener("submit", async (event) => {
     setSendStatus("Recovery path shown.", "ready");
     renderMessages({ errorText: error.message });
   } finally {
+    send.settle();
     clearLoadingTimers();
     submit.removeAttribute("aria-busy");
     submit.disabled = false;

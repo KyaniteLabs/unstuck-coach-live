@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 
 import { buildCoachInstructions } from "./lib/context.mjs";
 import { callCoachModel, publicProviderConfig, resolveLlmConfig } from "./lib/llm-client.mjs";
+import { USAGE_EVENT, USAGE_LOG_TYPE, createCoachRequestLifecycle } from "./lib/usage-events.mjs";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const DEFAULT_ROOT = resolve(__dirname, "..");
@@ -20,8 +21,7 @@ const MAX_HISTORY_MESSAGE_CHARS = 1_000;
 const DEFAULT_RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
 const DEFAULT_RATE_LIMIT_MAX = 12;
 const DEFAULT_MAX_CONCURRENT_MODEL_CALLS = 2;
-const USAGE_LOG_TYPE = "unstuck_usage";
-const POSTHOG_CAPTURE_EVENT = "unstuck_usage";
+const POSTHOG_CAPTURE_EVENT = USAGE_LOG_TYPE;
 const POSTHOG_DEFAULT_HOST = "https://us.i.posthog.com";
 const SECURITY_HEADERS = {
   "x-content-type-options": "nosniff",
@@ -80,6 +80,14 @@ function sendJson(response, status, body) {
     "cache-control": "no-store",
   });
   response.end(JSON.stringify(body));
+}
+
+function sendErrorJson(response, status, body) {
+  if (response.headersSent) {
+    response.end();
+    return;
+  }
+  sendJson(response, status, body);
 }
 
 function sendText(response, status, text) {
@@ -204,7 +212,11 @@ function logUsage(usageLogger, posthogLogger, request, event, metadata = {}) {
     posthogEnabled: posthogLogger ? "true" : "false",
     ...metadata,
   };
-  usageLogger(payload);
+  try {
+    usageLogger(payload);
+  } catch {
+    // Usage logging is best-effort: it must never change the request outcome.
+  }
   if (posthogLogger) {
     void posthogLogger(payload);
   }
@@ -429,6 +441,7 @@ export function createLiveDemoServer({
     const requestId = randomUUID();
     const startedAt = performance.now();
     const sessionId = anonymizeSessionId(request, env, usageSessionSalt);
+    const lifecycle = createCoachRequestLifecycle();
 
     try {
       if (request.method === "GET" && url.pathname === "/health") {
@@ -462,11 +475,10 @@ export function createLiveDemoServer({
         const chatStartMs = performance.now();
 
         if (!message) {
-          sendJson(response, 400, { error: "message is required" });
-          return;
+          throw new PublicHttpError(400, "message is required");
         }
 
-        logUsage(usageLogger, posthogLogger, request, "chat_started", {
+        logUsage(usageLogger, posthogLogger, request, lifecycle.start(), {
           hasSuppliedContext: Boolean(suppliedContext),
           historyTurns: history.length,
           messageLengthBucket: lengthBucket(body.message),
@@ -493,7 +505,7 @@ export function createLiveDemoServer({
         }
 
         const modelLatencyMs = Math.max(0, Math.round(performance.now() - chatStartMs));
-        logUsage(usageLogger, posthogLogger, request, "llm_reply_ok", {
+        logUsage(usageLogger, posthogLogger, request, lifecycle.reply(), {
           provider: result.provider,
           model: result.model,
           messageLengthBucket: lengthBucket(body.message),
@@ -521,13 +533,13 @@ export function createLiveDemoServer({
 
       if (request.method === "GET" || request.method === "HEAD") {
         if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
-          logUsage(usageLogger, posthogLogger, request, "view_landing", {
+          logUsage(usageLogger, posthogLogger, request, USAGE_EVENT.VIEW_LANDING, {
             requestId,
             sessionId,
           });
         }
         if (request.method === "GET" && (url.pathname === "/chat/" || url.pathname === "/chat/index.html")) {
-          logUsage(usageLogger, posthogLogger, request, "view_chat", {
+          logUsage(usageLogger, posthogLogger, request, USAGE_EVENT.VIEW_CHAT, {
             requestId,
             sessionId,
           });
@@ -538,32 +550,38 @@ export function createLiveDemoServer({
 
       sendText(response, 405, "Method not allowed");
     } catch (error) {
-      if (error instanceof PublicHttpError) {
-        logUsage(
-          usageLogger,
-          posthogLogger,
-          request,
-          error.status === 429 ? "rate_limited" : "request_rejected",
-          {
-          status: error.status,
+      // A request reports exactly one outcome. If it already reached a terminal
+      // state (e.g. the usage logger threw after the reply was recorded), do not
+      // log a second, contradictory outcome.
+      const canReportOutcome = !lifecycle.isTerminal;
+      try {
+        if (error instanceof PublicHttpError) {
+          if (canReportOutcome) {
+            logUsage(usageLogger, posthogLogger, request, lifecycle.reject(error.status), {
+              status: error.status,
+              requestId,
+              sessionId,
+              totalLatencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
+              rejectionType: error.publicMessage,
+              reason: error.publicMessage,
+            });
+          }
+          sendErrorJson(response, error.status, { error: error.publicMessage });
+          return;
+        }
+
+        if (canReportOutcome) {
+          logUsage(usageLogger, posthogLogger, request, lifecycle.fail(), {
             requestId,
             sessionId,
             totalLatencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
-            rejectionType: error.publicMessage,
-            reason: error.publicMessage,
-          },
-        );
-        sendJson(response, error.status, { error: error.publicMessage });
-        return;
+            errorType: error?.name || "Error",
+          });
+        }
+      } catch {
+        // Usage logging must never keep the client from getting a response.
       }
-
-      logUsage(usageLogger, posthogLogger, request, "llm_error", {
-        requestId,
-        sessionId,
-        totalLatencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
-        errorType: error?.name || "Error",
-      });
-      sendJson(response, 502, { error: "live demo failed" });
+      sendErrorJson(response, 502, { error: "live demo failed" });
     }
   });
 }
