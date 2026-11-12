@@ -15,11 +15,7 @@ concurrency:
 
 jobs:
   private-ready-gate:
-    # This private review repo currently has no registered self-hosted runner, and
-    # hosted Actions are billing-gated. Enable this only when a free runner lane
-    # or intentional public-release Actions budget is available.
-    if: vars.ENABLE_PRIVATE_REVIEW_CI == 'true'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
