@@ -37,6 +37,17 @@ let lastTrackedDraftBucket = null;
 
 const DRAFT_STORAGE_KEY = "unstuck_live_demo_draft";
 
+const RUNTIME_READY = "ready";
+const RUNTIME_NOT_CONFIGURED = "not-configured";
+const RUNTIME_LABEL_READY = "Live model ready";
+const RUNTIME_LABEL_NOT_CONFIGURED = "Live model not configured";
+const RUNTIME_SEND_NOT_CONFIGURED = "No live model configured.";
+const RUNTIME_REQUIREMENT_FALLBACK = "This demo server has no model credentials configured.";
+
+let runtimeState = "unknown";
+let runtimeConfig = null;
+let configRecheckInFlight = false;
+
 const intro = {
   role: "assistant",
   content: "Tell me what is stuck. Messy is fine.",
@@ -384,10 +395,33 @@ function getRuntimeDetail({ providerLabel, provider: providerName, model }) {
   return [providerLabel || providerName, model].filter(Boolean).join(" · ");
 }
 
+function isRuntimeConfigured(config) {
+  const providerName = String(config?.provider || "");
+  const model = String(config?.model || "");
+  return Boolean(providerName) && providerName !== RUNTIME_NOT_CONFIGURED && Boolean(model) && model !== "missing";
+}
+
+function getRequirement(config) {
+  return String(config?.warning || "").trim() || RUNTIME_REQUIREMENT_FALLBACK;
+}
+
+function applyRuntimeStatus(config) {
+  const detail = getRuntimeDetail(config);
+  if (isRuntimeConfigured(config)) {
+    runtimeState = RUNTIME_READY;
+    setRuntimeStatus(RUNTIME_LABEL_READY, detail);
+    return;
+  }
+
+  runtimeState = RUNTIME_NOT_CONFIGURED;
+  setRuntimeStatus(RUNTIME_LABEL_NOT_CONFIGURED, detail);
+  setSendStatus(RUNTIME_SEND_NOT_CONFIGURED, "ready");
+}
+
 async function loadConfig() {
   const response = await fetch("/api/config", { cache: "no-store" });
-  const config = await response.json();
-  setRuntimeStatus("Live model ready", getRuntimeDetail(config));
+  runtimeConfig = await response.json();
+  applyRuntimeStatus(runtimeConfig);
 }
 
 function insertText(text) {
@@ -415,6 +449,11 @@ function historyForRequest(turns) {
   }));
 }
 
+function getNotConfiguredMessage(config) {
+  const requirement = getRequirement(config);
+  return `The live model is not configured on this server, so nothing was sent to a model. Your text is still in the box. This is a setup gap, not a temporary glitch. The server reports: ${requirement} Add the key, restart the demo, then send again.`;
+}
+
 function getErrorMessage(response, body) {
   const message = body?.message || body?.error;
   if (response.status === 413) {
@@ -422,6 +461,9 @@ function getErrorMessage(response, body) {
   }
   if (response.status === 429) {
     return "The demo is busy right now. Your text is still here in the thread; wait a moment and send again.";
+  }
+  if (runtimeState === RUNTIME_NOT_CONFIGURED) {
+    return getNotConfiguredMessage(runtimeConfig);
   }
   if (response.status >= 500) {
     return "The live model stumbled. Your text is still visible in the thread — try again, or send the smallest chunk.";
@@ -632,8 +674,34 @@ message.addEventListener("keydown", (event) => {
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
 
-  const content = message.value.trim();
-  if (!content || send.isSending) {
+  let content = message.value.trim();
+  if (!content || send.isSending || configRecheckInFlight) {
+    return;
+  }
+
+  if (runtimeState === "unknown") {
+    configRecheckInFlight = true;
+    try {
+      await loadConfig().catch(() => {});
+    } finally {
+      configRecheckInFlight = false;
+    }
+    // The composer and the send machine can change while /api/config is in flight
+    // (someone types, or a second submit lands), so read both again before sending.
+    content = message.value.trim();
+    if (!content || send.isSending) {
+      return;
+    }
+  }
+
+  if (runtimeState === RUNTIME_NOT_CONFIGURED) {
+    trackChat("chat blocked: live model not configured", {
+      input_length_bucket: getLengthBucket(content),
+      has_energy: Boolean(energyLevel),
+    });
+    setSendStatus(RUNTIME_SEND_NOT_CONFIGURED, "ready");
+    renderMessages({ errorText: getNotConfiguredMessage(runtimeConfig) });
+    message.focus();
     return;
   }
 
@@ -677,7 +745,8 @@ form.addEventListener("submit", async (event) => {
     }
 
     thread.push({ role: "assistant", content: body.reply });
-    setRuntimeStatus("Live model ready", getRuntimeDetail(body));
+    runtimeState = RUNTIME_READY;
+    setRuntimeStatus(RUNTIME_LABEL_READY, getRuntimeDetail(body));
     trackChat("coach response received", {
       latency_ms: Math.round(performance.now() - startedAt),
       provider: body.provider || null,

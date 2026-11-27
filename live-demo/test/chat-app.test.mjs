@@ -92,7 +92,7 @@ function jsonResponse(status, body) {
   return { ok: status >= 200 && status < 300, status, json: async () => body };
 }
 
-async function loadApp(t, { fetchImpl } = {}) {
+async function loadApp(t, { fetchImpl, config = { provider: "test", model: "test" } } = {}) {
   const elements = new Map();
   const element = (selector) => {
     if (!elements.has(selector)) elements.set(selector, new FakeElement(selector));
@@ -130,7 +130,9 @@ async function loadApp(t, { fetchImpl } = {}) {
   };
   globalThis.fetch = async (url, options) => {
     fetchCalls.push({ url, options });
-    if (url === "/api/config") return jsonResponse(200, { provider: "test", model: "test" });
+    if (url === "/api/config") {
+      return jsonResponse(200, typeof config === "function" ? await config() : config);
+    }
     return fetchImpl(url, options);
   };
   t.after(() => {
@@ -149,6 +151,9 @@ async function loadApp(t, { fetchImpl } = {}) {
     message,
     storage,
     fetchCalls,
+    provider: element("#provider"),
+    sendStatus: element("#send-status"),
+    chatLog: element("#chat-log"),
     voiceButton: element("#voice-button"),
     voiceStatus: element("#voice-status"),
     coachCalls: () => fetchCalls.filter((call) => call.url === "/api/coach"),
@@ -260,4 +265,124 @@ test("only one coach request is in flight at a time", async (t) => {
 
   app.form.dispatch("submit");
   assert.equal(app.coachCalls().length, 2, "a new request is allowed after the first settles");
+});
+
+function chatLogText(chatLog) {
+  const collect = (node) => [node.textContent || "", ...(node.children || []).map(collect)].join(" ");
+  return (chatLog.children || []).map(collect).join(" ");
+}
+
+const NOT_CONFIGURED_CONFIG = {
+  provider: "not-configured",
+  providerLabel: "LLM not configured",
+  model: "missing",
+  warning: "OPENAI_API_KEY or LLM_API_KEY is required for OpenAI Responses mode.",
+};
+
+test("an unconfigured live model is labelled honestly instead of claiming it is ready", async (t) => {
+  const app = await loadApp(t, {
+    config: NOT_CONFIGURED_CONFIG,
+    fetchImpl: async () => jsonResponse(200, { reply: "unused" }),
+  });
+  await settle();
+  await settle();
+
+  assert.equal(app.provider.textContent, "Live model not configured");
+  assert.notEqual(app.provider.textContent, "Live model ready");
+  assert.match(app.provider.getAttribute("aria-label"), /LLM not configured/);
+  assert.equal(app.sendStatus.textContent, "No live model configured.");
+  assert.equal(app.coachCalls().length, 0);
+});
+
+test("a configured live model still reports that it is ready", async (t) => {
+  const app = await loadApp(t, { fetchImpl: async () => jsonResponse(200, { reply: "ok" }) });
+  await settle();
+  await settle();
+
+  assert.equal(app.provider.textContent, "Live model ready");
+});
+
+test("sending while unconfigured gives a setup diagnosis, not a transient stumble", async (t) => {
+  const app = await loadApp(t, {
+    config: NOT_CONFIGURED_CONFIG,
+    fetchImpl: async () => jsonResponse(200, { reply: "must not be called" }),
+  });
+  await settle();
+  await settle();
+
+  app.type("I cannot start this email");
+  app.form.dispatch("submit");
+  await settle();
+  await settle();
+
+  assert.equal(app.coachCalls().length, 0, "no request may be sent while the model is unconfigured");
+  const log = chatLogText(app.chatLog);
+  assert.match(log, /is not configured on this server/);
+  assert.match(log, /OPENAI_API_KEY or LLM_API_KEY is required/);
+  assert.doesNotMatch(log, /stumbled/i);
+  assert.doesNotMatch(log, /try again/i);
+  assert.equal(app.message.value, "I cannot start this email", "the draft stays in the box");
+});
+
+test("a submit re-checks the runtime when the first config read failed", async (t) => {
+  let attempts = 0;
+  const app = await loadApp(t, {
+    config: async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("offline");
+      return NOT_CONFIGURED_CONFIG;
+    },
+    fetchImpl: async () => jsonResponse(200, { reply: "must not be called" }),
+  });
+  await settle();
+  await settle();
+  assert.equal(app.provider.textContent, "Runtime unavailable");
+
+  app.type("still stuck");
+  app.form.dispatch("submit");
+  await settle();
+  await settle();
+
+  assert.equal(app.coachCalls().length, 0);
+  assert.equal(app.provider.textContent, "Live model not configured");
+  assert.match(chatLogText(app.chatLog), /is not configured on this server/);
+});
+
+test("a second submit during the config re-read does not send twice", async (t) => {
+  let configAttempts = 0;
+  const configGate = deferred();
+  const coachGate = deferred();
+  const app = await loadApp(t, {
+    config: async () => {
+      configAttempts += 1;
+      if (configAttempts === 1) throw new Error("offline");
+      return configGate.promise;
+    },
+    fetchImpl: () => coachGate.promise,
+  });
+  await settle();
+  await settle();
+  assert.equal(app.provider.textContent, "Runtime unavailable", "the first config read failed");
+
+  app.type("I cannot start this email");
+  app.form.dispatch("submit");
+  app.form.dispatch("submit"); // a double click / second Enter, same tick, inside the re-read
+  assert.equal(app.coachCalls().length, 0, "nothing may be sent while the re-read is pending");
+  assert.equal(configAttempts, 2, "the second submit joins the pending re-read instead of starting another");
+
+  configGate.resolve({ provider: "openai-compatible", providerLabel: "OpenAI-compatible LLM", model: "test-model" });
+  await settle();
+  await settle();
+  await settle();
+
+  assert.equal(app.coachCalls().length, 1, "the double submit must produce exactly one coach request");
+  const log = chatLogText(app.chatLog);
+  assert.equal((log.match(/I cannot start this email/g) || []).length, 1, "exactly one user turn");
+  assert.equal(app.message.value, "", "the composer is cleared once for the accepted send");
+
+  coachGate.resolve(jsonResponse(200, { reply: "Open the doc." }));
+  await settle();
+  await settle();
+  assert.match(chatLogText(app.chatLog), /Open the doc\./);
+  assert.equal(app.provider.textContent, "Live model ready");
 });
