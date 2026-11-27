@@ -32,6 +32,9 @@ test("public demo uses a normal chat interface", () => {
   assert.match(script, /RUNTIME_LABEL_NOT_CONFIGURED = "Live model not configured"/);
   assert.match(script, /isRuntimeConfigured\(config\)/);
   assert.match(script, /runtimeState === RUNTIME_NOT_CONFIGURED/);
+  assert.match(script, /let configRecheckInFlight = false/);
+  assert.match(script, /if \(!content \|\| send\.isSending \|\| configRecheckInFlight\)/);
+  assert.match(script, /content = message\.value\.trim\(\);\n    if \(!content \|\| send\.isSending\)/);
   assert.doesNotMatch(script, /providerLabel\\} · \\$\\{.*model/);
   assert.match(script, /history/);
   assert.match(script, /thread\.push\(\{ role: "user"/);

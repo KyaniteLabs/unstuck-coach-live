@@ -347,3 +347,42 @@ test("a submit re-checks the runtime when the first config read failed", async (
   assert.equal(app.provider.textContent, "Live model not configured");
   assert.match(chatLogText(app.chatLog), /is not configured on this server/);
 });
+
+test("a second submit during the config re-read does not send twice", async (t) => {
+  let configAttempts = 0;
+  const configGate = deferred();
+  const coachGate = deferred();
+  const app = await loadApp(t, {
+    config: async () => {
+      configAttempts += 1;
+      if (configAttempts === 1) throw new Error("offline");
+      return configGate.promise;
+    },
+    fetchImpl: () => coachGate.promise,
+  });
+  await settle();
+  await settle();
+  assert.equal(app.provider.textContent, "Runtime unavailable", "the first config read failed");
+
+  app.type("I cannot start this email");
+  app.form.dispatch("submit");
+  app.form.dispatch("submit"); // a double click / second Enter, same tick, inside the re-read
+  assert.equal(app.coachCalls().length, 0, "nothing may be sent while the re-read is pending");
+  assert.equal(configAttempts, 2, "the second submit joins the pending re-read instead of starting another");
+
+  configGate.resolve({ provider: "openai-compatible", providerLabel: "OpenAI-compatible LLM", model: "test-model" });
+  await settle();
+  await settle();
+  await settle();
+
+  assert.equal(app.coachCalls().length, 1, "the double submit must produce exactly one coach request");
+  const log = chatLogText(app.chatLog);
+  assert.equal((log.match(/I cannot start this email/g) || []).length, 1, "exactly one user turn");
+  assert.equal(app.message.value, "", "the composer is cleared once for the accepted send");
+
+  coachGate.resolve(jsonResponse(200, { reply: "Open the doc." }));
+  await settle();
+  await settle();
+  assert.match(chatLogText(app.chatLog), /Open the doc\./);
+  assert.equal(app.provider.textContent, "Live model ready");
+});

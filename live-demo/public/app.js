@@ -46,6 +46,7 @@ const RUNTIME_REQUIREMENT_FALLBACK = "This demo server has no model credentials 
 
 let runtimeState = "unknown";
 let runtimeConfig = null;
+let configRecheckInFlight = false;
 
 const intro = {
   role: "assistant",
@@ -673,13 +674,24 @@ message.addEventListener("keydown", (event) => {
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
 
-  const content = message.value.trim();
-  if (!content || send.isSending) {
+  let content = message.value.trim();
+  if (!content || send.isSending || configRecheckInFlight) {
     return;
   }
 
   if (runtimeState === "unknown") {
-    await loadConfig().catch(() => {});
+    configRecheckInFlight = true;
+    try {
+      await loadConfig().catch(() => {});
+    } finally {
+      configRecheckInFlight = false;
+    }
+    // The composer and the send machine can change while /api/config is in flight
+    // (someone types, or a second submit lands), so read both again before sending.
+    content = message.value.trim();
+    if (!content || send.isSending) {
+      return;
+    }
   }
 
   if (runtimeState === RUNTIME_NOT_CONFIGURED) {
